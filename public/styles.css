@@ -62,6 +62,9 @@ body {
 .section-label { font-size: 14px; font-weight: 600; color: var(--cream-dim); }
 .empty-state { padding: 24px; border-radius: 12px; text-align: center; font-size: 14px; background: rgba(244,238,221,0.04); border: 1px dashed var(--line); color: var(--cream-dim); }
 .card { padding: 16px; border-radius: 12px; background: rgba(244,238,221,0.05); border: 1px solid var(--line); }
+.card.now-dancing { border-color: var(--gold); background: linear-gradient(90deg, rgba(231,181,75,0.14), rgba(244,238,221,0.05)); box-shadow: 0 0 0 1px rgba(231,181,75,0.3); }
+.reorder-btn { width: 22px; height: 18px; font-size: 9px; line-height: 1; background: rgba(244,238,221,0.08); border: 1px solid var(--line); border-radius: 4px; color: var(--cream-dim); cursor: pointer; }
+.reorder-btn:disabled { opacity: 0.25; cursor: default; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .btn {
   display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 8px;

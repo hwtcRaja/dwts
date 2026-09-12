@@ -33,6 +33,7 @@ const S = {
   openHistoryWeek: null,
   knownJudges: [],
   justSaved: false,
+  weekBackgrounds: {}, // weekId -> dataUrl | null, fetched on demand
   loading: true,
 };
 
@@ -95,10 +96,87 @@ function render() {
     return;
   }
   if (!S.role) {
+    applyPageBackground(null);
     app.innerHTML = roleChooserHtml();
     return;
   }
   app.innerHTML = S.role === "host" ? hostHtml() : guestHtml();
+  applyPageBackground();
+  ensureBackgroundLoaded();
+}
+
+function applyPageBackground(forceUrl) {
+  let url = forceUrl;
+  if (url === undefined) {
+    const activeWeek = S.data && S.data.weeks.find((w) => w.id === S.data.activeWeekId);
+    url = activeWeek ? S.weekBackgrounds[activeWeek.id] : null;
+  }
+  if (url) {
+    document.body.style.backgroundImage = `linear-gradient(rgba(23,21,34,0.72), rgba(23,21,34,0.85)), url("${url}")`;
+    document.body.style.backgroundSize = "cover";
+    document.body.style.backgroundPosition = "center";
+    document.body.style.backgroundRepeat = "no-repeat";
+    document.body.style.backgroundAttachment = "fixed";
+  } else {
+    document.body.style.backgroundImage = "";
+    document.body.style.backgroundSize = "";
+    document.body.style.backgroundPosition = "";
+    document.body.style.backgroundRepeat = "";
+    document.body.style.backgroundAttachment = "";
+  }
+}
+
+async function ensureBackgroundLoaded() {
+  const activeWeek = S.data && S.data.weeks.find((w) => w.id === S.data.activeWeekId);
+  if (!activeWeek) return;
+  if (!activeWeek.hasBackground) {
+    if (S.weekBackgrounds[activeWeek.id] !== null && S.weekBackgrounds[activeWeek.id] !== undefined) {
+      S.weekBackgrounds[activeWeek.id] = null;
+      applyPageBackground();
+    }
+    return;
+  }
+  if (S.weekBackgrounds[activeWeek.id] === undefined) {
+    try {
+      const result = await api(`/api/weeks/${activeWeek.id}/background`);
+      S.weekBackgrounds[activeWeek.id] = result.image || null;
+      applyPageBackground();
+    } catch (e) {
+      S.weekBackgrounds[activeWeek.id] = null;
+    }
+  }
+}
+
+function resizeImageFile(file, maxDim, quality) {
+  maxDim = maxDim || 1600;
+  quality = quality || 0.82;
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let { width, height } = img;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        canvas.getContext("2d").drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 // ---------------------------------------------------------------
@@ -160,11 +238,11 @@ function hostHtml() {
   return `
     <div class="header">
       <div class="header-row">
-        <div>
+        <div style="flex:1 1 260px;min-width:0;">
           <div class="eyebrow">★ Dancing From the Couch · Host view</div>
           <input class="season-name-input" value="${esc(d.seasonName)}" data-field="seasonName" />
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
+        <div style="display:flex;align-items:center;gap:8px;flex:0 0 auto;">
           <div class="pill">👥 ${d.contestants.length} &nbsp;·&nbsp; 🎵 ${d.weeks.length}</div>
           <button class="switch-btn" data-action="set-role" data-role="">Switch view</button>
         </div>
@@ -258,6 +336,15 @@ function judgesTabHtml() {
 }
 
 
+function getLineup(week, eligible) {
+  const eligibleIds = eligible.map((c) => c.id);
+  const byId = {};
+  eligible.forEach((c) => (byId[c.id] = c));
+  const ordered = (week.lineup || []).filter((id) => eligibleIds.includes(id)).map((id) => byId[id]);
+  const missing = eligible.filter((c) => !(week.lineup || []).includes(c.id));
+  return [...ordered, ...missing];
+}
+
 function scoreTabHtml(d) {
   const sortedWeeks = [...d.weeks].sort((a, b) => a.order - b.order);
   const activeWeek = d.weeks.find((w) => w.id === d.activeWeekId);
@@ -288,23 +375,48 @@ function scoreTabHtml(d) {
     Object.values(activeWeek.scores).flatMap((s) => s.judges.map((j) => j.name))
   ).size;
 
-  const rows = eligible
-    .map((c) => {
+  const lineup = getLineup(activeWeek, eligible);
+  const currentId = activeWeek.currentContestantId;
+  const currentIdx = lineup.findIndex((c) => c.id === currentId);
+
+  const cycleControls =
+    lineup.length > 0
+      ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+          <button class="btn btn-outline" data-action="cycle-current" data-week-id="${activeWeek.id}" data-dir="prev">◀ Prev</button>
+          <div style="font-size:13px;color:var(--cream-dim);flex:1;text-align:center;">
+            ${currentIdx >= 0 ? `🎤 Now dancing: <strong style="color:var(--gold);">${esc(lineup[currentIdx].name)}</strong>` : "No one marked as dancing yet"}
+          </div>
+          <button class="btn btn-outline" data-action="cycle-current" data-week-id="${activeWeek.id}" data-dir="next">Next ▶</button>
+        </div>`
+      : "";
+
+  const rows = lineup
+    .map((c, idx) => {
       const entry = activeWeek.scores[c.id];
       const judgesLine = entry
         ? entry.judges.map((j) => `${esc(j.name)}: ${j.score}`).join(" · ")
         : "no scores yet";
+      const isCurrent = c.id === currentId;
       return `
-      <div class="card" style="margin-bottom:10px;">
+      <div class="card ${isCurrent ? "now-dancing" : ""}" style="margin-bottom:10px;">
         <div class="row">
-          <div>
-            <div class="couple-name">${esc(c.name)}</div>
-            ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
-            <div class="couple-sub" style="margin-top:6px;">${judgesLine}</div>
+          <div style="display:flex;align-items:flex-start;gap:10px;">
+            <div style="display:flex;flex-direction:column;gap:2px;">
+              <button class="reorder-btn" data-action="move-lineup" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" data-dir="up" ${idx === 0 ? "disabled" : ""}>▲</button>
+              <button class="reorder-btn" data-action="move-lineup" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" data-dir="down" ${idx === lineup.length - 1 ? "disabled" : ""}>▼</button>
+            </div>
+            <div>
+              <div class="couple-name">${isCurrent ? "🎤 " : ""}${esc(c.name)}</div>
+              ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
+              <div class="couple-sub" style="margin-top:6px;">${judgesLine}</div>
+            </div>
           </div>
-          <div style="text-align:right;">
+          <div style="text-align:right;display:flex;flex-direction:column;align-items:flex-end;gap:6px;">
             <div class="score-total">${entry ? entry.avg.toFixed(1) : "–"}</div>
             <div style="font-size:11px;color:var(--cream-dim);">${entry ? entry.count + " judge" + (entry.count === 1 ? "" : "s") : ""}</div>
+            <button class="btn ${isCurrent ? "btn-outline-good" : "btn-outline"}" style="font-size:11px;padding:4px 10px;" data-action="set-current" data-week-id="${activeWeek.id}" data-contestant-id="${isCurrent ? "" : c.id}">
+              ${isCurrent ? "Clear" : "Mark dancing"}
+            </button>
           </div>
         </div>
       </div>`;
@@ -317,9 +429,12 @@ function scoreTabHtml(d) {
     <div class="week-toolbar">
       <label class="field">Week name<input type="text" value="${esc(activeWeek.label)}" data-field="weekLabel" data-week-id="${activeWeek.id}" style="min-width:160px;" /></label>
       <label class="field">Theme / dance night<input type="text" value="${esc(activeWeek.danceNight)}" placeholder="e.g. Latin Night" data-field="weekDance" data-week-id="${activeWeek.id}" style="min-width:180px;" /></label>
+      <label class="field">Week background<input type="file" accept="image/*" data-field="weekBackground" data-week-id="${activeWeek.id}" style="max-width:170px;font-size:12px;" /></label>
+      ${activeWeek.hasBackground ? `<button class="btn btn-outline-bad" style="align-self:flex-end;" data-action="remove-week-background" data-week-id="${activeWeek.id}">🗑 Remove background</button>` : ""}
       <button class="btn btn-outline-bad" style="margin-left:auto;" data-action="delete-week" data-id="${activeWeek.id}">🗑 Delete week</button>
     </div>
     <div style="font-size:13px;color:var(--cream-dim);margin-bottom:12px;">📱 ${totalJudges} judge${totalJudges === 1 ? "" : "s"} have scored so far this week</div>
+    ${cycleControls}
     ${rows}
   `
   );
@@ -453,10 +568,11 @@ function judgeHtml() {
         Judging <strong style="color:var(--cream);">${esc(activeWeek.label)}</strong>${activeWeek.danceNight ? ` · ${esc(activeWeek.danceNight)}` : ""} — score each couple 1–10
       </div>
       ${S.justSaved ? `<div class="just-voted">✓ Score saved!</div>` : ""}
-      ${eligible
+      ${getLineup(activeWeek, eligible)
         .map((c) => {
           const entry = activeWeek.scores[c.id];
           const mine = entry ? (entry.judges.find((j) => j.name === S.judgeName) || {}).score : undefined;
+          const isCurrent = c.id === activeWeek.currentContestantId;
           const numButtons = Array.from({ length: 10 })
             .map((_, i) => {
               const n = i + 1;
@@ -465,10 +581,10 @@ function judgeHtml() {
             })
             .join("");
           return `
-          <div class="card guest-score-card">
+          <div class="card guest-score-card ${isCurrent ? "now-dancing" : ""}">
             <div class="row" style="margin-bottom:10px;">
               <div>
-                <div class="couple-name">${esc(c.name)}</div>
+                <div class="couple-name">${isCurrent ? "🎤 " : ""}${esc(c.name)}</div>
                 ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
               </div>
               <div style="font-size:12px;color:var(--cream-dim);text-align:right;">
@@ -555,8 +671,52 @@ document.addEventListener("click", async (e) => {
       render();
       return;
     }
+    if (action === "remove-week-background") {
+      await api(`/api/weeks/${btn.dataset.weekId}/background`, "DELETE");
+      const week = S.data.weeks.find((w) => w.id === Number(btn.dataset.weekId));
+      if (week) week.hasBackground = false;
+      S.weekBackgrounds[Number(btn.dataset.weekId)] = null;
+      render();
+      return;
+    }
     if (action === "select-week") {
       S.data = await api("/api/season", "PATCH", { activeWeekId: Number(btn.dataset.id) });
+      render();
+      return;
+    }
+    if (action === "move-lineup") {
+      const week = S.data.weeks.find((w) => w.id === Number(btn.dataset.weekId));
+      const eligible = S.data.contestants.filter((c) => !c.eliminated || c.eliminatedWeekLabel === week.label);
+      const lineup = getLineup(week, eligible).map((c) => c.id);
+      const cid = Number(btn.dataset.contestantId);
+      const idx = lineup.indexOf(cid);
+      const dir = btn.dataset.dir;
+      const swapWith = dir === "up" ? idx - 1 : idx + 1;
+      if (swapWith < 0 || swapWith >= lineup.length) return;
+      [lineup[idx], lineup[swapWith]] = [lineup[swapWith], lineup[idx]];
+      S.data = await api(`/api/weeks/${week.id}`, "PATCH", { lineup });
+      render();
+      return;
+    }
+    if (action === "set-current") {
+      const contestantId = btn.dataset.contestantId ? Number(btn.dataset.contestantId) : null;
+      S.data = await api(`/api/weeks/${btn.dataset.weekId}/current`, "POST", { contestantId });
+      render();
+      return;
+    }
+    if (action === "cycle-current") {
+      const week = S.data.weeks.find((w) => w.id === Number(btn.dataset.weekId));
+      const eligible = S.data.contestants.filter((c) => !c.eliminated || c.eliminatedWeekLabel === week.label);
+      const lineup = getLineup(week, eligible);
+      if (lineup.length === 0) return;
+      const curIdx = lineup.findIndex((c) => c.id === week.currentContestantId);
+      let nextIdx;
+      if (btn.dataset.dir === "next") {
+        nextIdx = curIdx < 0 ? 0 : (curIdx + 1) % lineup.length;
+      } else {
+        nextIdx = curIdx < 0 ? lineup.length - 1 : (curIdx - 1 + lineup.length) % lineup.length;
+      }
+      S.data = await api(`/api/weeks/${week.id}/current`, "POST", { contestantId: lineup[nextIdx].id });
       render();
       return;
     }
@@ -634,6 +794,18 @@ document.addEventListener("change", async (e) => {
     }
     if (t.dataset.field === "weekDance") {
       S.data = await api(`/api/weeks/${t.dataset.weekId}`, "PATCH", { danceNight: t.value });
+      render();
+      return;
+    }
+    if (t.dataset.field === "weekBackground") {
+      const file = t.files[0];
+      if (!file) return;
+      const weekId = Number(t.dataset.weekId);
+      const dataUrl = await resizeImageFile(file);
+      await api(`/api/weeks/${weekId}/background`, "POST", { image: dataUrl });
+      const week = S.data.weeks.find((w) => w.id === weekId);
+      if (week) week.hasBackground = true;
+      S.weekBackgrounds[weekId] = dataUrl;
       render();
       return;
     }

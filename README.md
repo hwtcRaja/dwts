@@ -21,6 +21,10 @@ frontend. No build step.
   any score at any time while that week is open. A couple's score for the
   week is the **average across every judge who scored them**. Those weekly
   averages sum into the season leaderboard.
+- Each week can have its own **background photo** to match that week's theme
+  (Latin Night, Movie Night, whatever) — upload it once from the host's
+  "This Week" tab and it becomes the backdrop for everyone, host and judges
+  alike, for as long as that week is active.
 
 ## What's inside
 

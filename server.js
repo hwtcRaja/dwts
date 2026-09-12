@@ -20,7 +20,7 @@ const pool = new Pool({
 });
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "8mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 // ---------------------------------------------------------------
@@ -60,6 +60,9 @@ async function initSchema() {
       dance_night TEXT DEFAULT ''
     );
   `);
+  await pool.query(`ALTER TABLE weeks ADD COLUMN IF NOT EXISTS lineup JSONB NOT NULL DEFAULT '[]';`);
+  await pool.query(`ALTER TABLE weeks ADD COLUMN IF NOT EXISTS current_contestant_id INT;`);
+  await pool.query(`ALTER TABLE weeks ADD COLUMN IF NOT EXISTS background_image TEXT;`);
   // superseded: scores used to be typed in by the host, plus a separate guest "bonus"
   await pool.query(`DROP TABLE IF EXISTS week_scores CASCADE;`);
   await pool.query(`DROP TABLE IF EXISTS votes CASCADE;`);
@@ -137,6 +140,9 @@ async function getFullState() {
       order: w.order_num,
       label: w.label,
       danceNight: w.dance_night,
+      lineup: w.lineup || [],
+      currentContestantId: w.current_contestant_id,
+      hasBackground: !!w.background_image,
       scores,
     };
   });
@@ -283,16 +289,70 @@ app.post("/api/weeks", async (req, res) => {
 });
 
 app.patch("/api/weeks/:id", async (req, res) => {
-  const { label, danceNight } = req.body;
+  const { label, danceNight, lineup } = req.body;
   try {
     await pool.query(
-      `UPDATE weeks SET label = COALESCE($1, label), dance_night = COALESCE($2, dance_night) WHERE id = $3`,
-      [label, danceNight, req.params.id]
+      `UPDATE weeks SET
+        label = COALESCE($1, label),
+        dance_night = COALESCE($2, dance_night),
+        lineup = COALESCE($3::jsonb, lineup)
+       WHERE id = $4`,
+      [label, danceNight, lineup ? JSON.stringify(lineup) : null, req.params.id]
     );
     res.json(await getFullState());
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Could not update week" });
+  }
+});
+
+app.post("/api/weeks/:id/current", async (req, res) => {
+  const { contestantId } = req.body; // pass null to clear
+  try {
+    await pool.query(`UPDATE weeks SET current_contestant_id = $1 WHERE id = $2`, [
+      contestantId || null,
+      req.params.id,
+    ]);
+    res.json(await getFullState());
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not set current dancer" });
+  }
+});
+
+// Background images are kept out of getFullState() / the frequent poll —
+// they're fetched on demand, once per week, and cached client-side.
+app.get("/api/weeks/:id/background", async (req, res) => {
+  try {
+    const row = (
+      await pool.query(`SELECT background_image FROM weeks WHERE id = $1`, [req.params.id])
+    ).rows[0];
+    res.json({ image: row ? row.background_image : null });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not load background" });
+  }
+});
+
+app.post("/api/weeks/:id/background", async (req, res) => {
+  const { image } = req.body;
+  if (!image || typeof image !== "string") return res.status(400).json({ error: "Image required" });
+  try {
+    await pool.query(`UPDATE weeks SET background_image = $1 WHERE id = $2`, [image, req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not save background" });
+  }
+});
+
+app.delete("/api/weeks/:id/background", async (req, res) => {
+  try {
+    await pool.query(`UPDATE weeks SET background_image = NULL WHERE id = $1`, [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not remove background" });
   }
 });
 
