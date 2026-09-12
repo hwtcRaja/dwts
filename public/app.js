@@ -65,9 +65,7 @@ async function boot() {
   render();
   try {
     S.data = await api("/api/state");
-    if (S.role === "guest") {
-      S.knownJudges = await api("/api/judges");
-    }
+    S.knownJudges = await api("/api/judges");
   } catch (e) {
     console.error(e);
   }
@@ -81,6 +79,7 @@ async function boot() {
 async function refreshState() {
   try {
     S.data = await api("/api/state");
+    S.knownJudges = await api("/api/judges");
     render();
   } catch (e) {
     console.error(e);
@@ -108,7 +107,7 @@ function render() {
 function roleChooserHtml() {
   return `
     <div class="role-wrap">
-      <div class="eyebrow">★ Weekly dance party</div>
+      <div class="eyebrow">★ Dancing From the Couch</div>
       <h1 class="marquee" style="font-size:28px;font-weight:600;margin:0;">How are you joining tonight?</h1>
       <div class="role-grid">
         <button class="role-card" data-action="set-role" data-role="host">
@@ -162,7 +161,7 @@ function hostHtml() {
     <div class="header">
       <div class="header-row">
         <div>
-          <div class="eyebrow">★ Weekly dance party · Host view</div>
+          <div class="eyebrow">★ Dancing From the Couch · Host view</div>
           <input class="season-name-input" value="${esc(d.seasonName)}" data-field="seasonName" />
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
@@ -175,6 +174,7 @@ function hostHtml() {
         ${tabBtn("leaderboard", "Leaderboard")}
         ${tabBtn("history", "History")}
         ${tabBtn("couples", "Couples")}
+        ${tabBtn("judges", "Judges")}
       </div>
     </div>
     <div class="content">
@@ -182,6 +182,7 @@ function hostHtml() {
       ${S.tab === "leaderboard" ? leaderboardTabHtml(d) : ""}
       ${S.tab === "history" ? historyTabHtml(d) : ""}
       ${S.tab === "couples" ? couplesTabHtml(d) : ""}
+      ${S.tab === "judges" ? judgesTabHtml() : ""}
     </div>
   `;
 }
@@ -228,7 +229,35 @@ function couplesTabHtml(d) {
   `;
 }
 
-// ---- This Week (monitor only, no input) ----
+// ---- Judges ----
+function judgesTabHtml() {
+  const judges = S.knownJudges || [];
+  const rows = judges
+    .map(
+      (j) => `
+    <div class="couple-row">
+      <div class="couple-name">${esc(j.name)}</div>
+      <button class="icon-btn" data-action="remove-judge" data-slug="${esc(j.slug)}">🗑</button>
+    </div>`
+    )
+    .join("");
+
+  return `
+    <div>
+      <div class="section-label">Judges</div>
+      ${judges.length === 0 ? `<div class="empty-state" style="margin-top:12px;">No judges yet — anyone who scores a couple from their phone is added automatically, or add one ahead of time below.</div>` : `<div style="margin-top:12px;max-width:420px;">${rows}</div>`}
+      <div class="card" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px;margin-top:16px;border-style:dashed;max-width:420px;">
+        <label class="field">Name<input type="text" id="new-judge-name" placeholder="e.g. Sam" style="min-width:160px;" /></label>
+        <button class="btn btn-gold" data-action="add-judge">+ Add judge</button>
+      </div>
+      <div class="empty-state" style="margin-top:20px;max-width:520px;text-align:left;">
+        Removing a judge also removes every score they've submitted, and they'll disappear from the "who's judging?" list on the phone view. They can always re-add themselves by scoring again.
+      </div>
+    </div>
+  `;
+}
+
+
 function scoreTabHtml(d) {
   const sortedWeeks = [...d.weeks].sort((a, b) => a.order - b.order);
   const activeWeek = d.weeks.find((w) => w.id === d.activeWeekId);
@@ -540,6 +569,19 @@ document.addEventListener("click", async (e) => {
       S.judgeName = btn.dataset.name;
       localStorage.setItem("dwts_judge_name", S.judgeName);
       render();
+      return;
+    }
+    if (action === "add-judge") {
+      const nameInput = document.getElementById("new-judge-name");
+      const name = nameInput.value;
+      if (!name.trim()) return;
+      S.knownJudges = await api("/api/judges", "POST", { name });
+      render();
+      return;
+    }
+    if (action === "remove-judge") {
+      S.knownJudges = await api(`/api/judges/${btn.dataset.slug}`, "DELETE");
+      await refreshState();
       return;
     }
     if (action === "switch-judge") {

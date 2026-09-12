@@ -75,6 +75,21 @@ async function initSchema() {
       PRIMARY KEY (week_id, voter_slug, contestant_id)
     );
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS judges (
+      slug TEXT PRIMARY KEY,
+      name TEXT NOT NULL
+    );
+  `);
+  // backfill judges from any scores recorded before this table existed
+  await pool.query(`
+    INSERT INTO judges (slug, name)
+    SELECT DISTINCT ON (voter_slug) voter_slug, voter_name
+    FROM guest_scores
+    ORDER BY voter_slug, ts DESC
+    ON CONFLICT (slug) DO NOTHING;
+  `);
 }
 
 const slugify = (s) =>
@@ -148,21 +163,41 @@ app.get("/api/state", async (req, res) => {
 
 app.get("/api/judges", async (req, res) => {
   try {
-    const rows = (
-      await pool.query(
-        `SELECT DISTINCT ON (voter_slug) voter_slug, voter_name
-         FROM guest_scores
-         ORDER BY voter_slug, ts DESC`
-      )
-    ).rows;
-    res.json(
-      rows
-        .map((r) => ({ slug: r.voter_slug, name: r.voter_name }))
-        .sort((a, b) => a.name.localeCompare(b.name))
-    );
+    const rows = (await pool.query(`SELECT slug, name FROM judges ORDER BY name ASC`)).rows;
+    res.json(rows);
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Could not load judges" });
+  }
+});
+
+app.post("/api/judges", async (req, res) => {
+  const { name } = req.body;
+  if (!name || !name.trim()) return res.status(400).json({ error: "Name required" });
+  const slug = slugify(name);
+  try {
+    await pool.query(
+      `INSERT INTO judges (slug, name) VALUES ($1, $2)
+       ON CONFLICT (slug) DO UPDATE SET name = $2`,
+      [slug, name.trim()]
+    );
+    const rows = (await pool.query(`SELECT slug, name FROM judges ORDER BY name ASC`)).rows;
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not add judge" });
+  }
+});
+
+app.delete("/api/judges/:slug", async (req, res) => {
+  try {
+    await pool.query(`DELETE FROM guest_scores WHERE voter_slug = $1`, [req.params.slug]);
+    await pool.query(`DELETE FROM judges WHERE slug = $1`, [req.params.slug]);
+    const rows = (await pool.query(`SELECT slug, name FROM judges ORDER BY name ASC`)).rows;
+    res.json(rows);
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not remove judge" });
   }
 });
 
@@ -282,6 +317,11 @@ app.post("/api/weeks/:id/judge-score", async (req, res) => {
   const clamped = Math.max(1, Math.min(10, Number(score) || 0));
   const slug = slugify(name);
   try {
+    await pool.query(
+      `INSERT INTO judges (slug, name) VALUES ($1, $2)
+       ON CONFLICT (slug) DO UPDATE SET name = $2`,
+      [slug, name.trim()]
+    );
     await pool.query(
       `INSERT INTO guest_scores (week_id, voter_slug, voter_name, contestant_id, score, ts)
        VALUES ($1, $2, $3, $4, $5, $6)
