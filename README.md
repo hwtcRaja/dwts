@@ -10,8 +10,9 @@ frontend. No build step.
   tables on first boot.
 - `public/` — the frontend (`index.html`, `app.js`, `styles.css`). Plain
   JavaScript, no framework or bundler.
-- Data model: a season (name, judges, points-per-vote, active week), couples,
-  weeks, per-couple scores, and one vote row per guest per week.
+- Data model: a season (name, judges, guest-score weight, active week),
+  couples, weeks, per-couple judge scores, and one guest score row per
+  guest per couple per week (guests act as extra judges, scoring 1–10).
 
 ## Deploying to Railway
 
@@ -55,11 +56,11 @@ Then open `http://localhost:3000`.
 ## Notes
 
 - **This is a public app** by default — anyone with the URL can open it, see
-  the roster, and vote. There's no login. That's fine for a link you only
+  the roster, and judge. There's no login. That's fine for a link you only
   share with your own guests, but don't post it anywhere public. If you want
   real access control later, the natural next step is adding a simple host
   password on the season-editing routes.
 - The "Switch view" button just changes what your *own* browser shows
   (stored in `localStorage`) — it doesn't affect anyone else's device.
-- Judge scores, bonus points, and votes all live in Postgres, so the season
-  persists across restarts and redeploys.
+- Judge scores, bonus points, and guest scores all live in Postgres, so the
+  season persists across restarts and redeploys.

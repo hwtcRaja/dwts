@@ -31,10 +31,12 @@ const S = {
   data: null,
   tab: "score",
   openHistoryWeek: null,
-  voteTally: {},
-  voters: [],
-  justVoted: false,
-  myVote: null,
+  guestAverages: {},
+  guestCounts: {},
+  guestRaw: [],
+  distinctGuests: 0,
+  myScores: {},
+  justSaved: false,
   loading: true,
 };
 
@@ -69,8 +71,8 @@ async function boot() {
 
   clearInterval(pollHandle);
   if (S.role === "host") {
-    pollHandle = setInterval(pollActiveWeekVotes, 4000);
-    pollActiveWeekVotes();
+    pollHandle = setInterval(pollActiveWeekGuestScores, 4000);
+    pollActiveWeekGuestScores();
   } else {
     pollHandle = setInterval(guestPoll, 4000);
     guestPoll();
@@ -86,12 +88,16 @@ async function refreshState() {
   }
 }
 
-async function pollActiveWeekVotes() {
+async function pollActiveWeekGuestScores() {
   if (!S.data || !S.data.activeWeekId) return;
   try {
-    const { tally, voters } = await api(`/api/weeks/${S.data.activeWeekId}/votes`);
-    S.voteTally = tally;
-    S.voters = voters;
+    const { averages, counts, raw, distinctGuests } = await api(
+      `/api/weeks/${S.data.activeWeekId}/guest-scores`
+    );
+    S.guestAverages = averages;
+    S.guestCounts = counts;
+    S.guestRaw = raw;
+    S.distinctGuests = distinctGuests;
     render();
   } catch (e) {
     // ignore
@@ -102,12 +108,18 @@ async function guestPoll() {
   await refreshState();
   if (S.data && S.data.activeWeekId) {
     try {
-      const { tally, voters } = await api(`/api/weeks/${S.data.activeWeekId}/votes`);
-      S.voteTally = tally;
-      S.voters = voters;
+      const { averages, counts, raw, distinctGuests } = await api(
+        `/api/weeks/${S.data.activeWeekId}/guest-scores`
+      );
+      S.guestAverages = averages;
+      S.guestCounts = counts;
+      S.guestRaw = raw;
+      S.distinctGuests = distinctGuests;
       if (S.guestName) {
-        const mine = voters.find((v) => v.name === S.guestName);
-        if (mine) S.myVote = mine.contestantId;
+        S.myScores = {};
+        raw
+          .filter((r) => r.voterName === S.guestName)
+          .forEach((r) => (S.myScores[r.contestantId] = r.score));
       }
       render();
     } catch (e) {}
@@ -153,8 +165,8 @@ function roleChooserHtml() {
         </button>
         <button class="role-card" data-action="set-role" data-role="guest">
           <div class="icon" style="font-size:22px;">📱</div>
-          <div class="title">I'm voting</div>
-          <div class="desc">Cast your pick for this week from your phone.</div>
+          <div class="title">I'm a guest judge</div>
+          <div class="desc">Score each couple 1–10 from your phone, just like the real judges.</div>
         </button>
       </div>
     </div>
@@ -291,11 +303,11 @@ function couplesTabHtml(d) {
           </div>
         </div>
         <div>
-          <div class="section-label">Guest voting</div>
+          <div class="section-label">Guest judging</div>
           <div class="card" style="margin-top:12px;">
-            <div style="font-size:14px;color:var(--cream-dim);margin-bottom:8px;">Points added per guest vote</div>
+            <div style="font-size:14px;color:var(--cream-dim);margin-bottom:8px;">Weight applied to the guest average</div>
             <div style="display:flex;gap:8px;">${voteButtons}</div>
-            <div style="font-size:12px;color:var(--cream-dim);margin-top:12px;">Share this app's URL with your guests — on their phone they'll choose "I'm voting" and pick a couple each week.</div>
+            <div style="font-size:12px;color:var(--cream-dim);margin-top:12px;">Guests score each couple 1–10, just like the real judges. Their average score (× this weight) becomes that couple's bonus points when you convert it. Share this app's URL with your guests — on their phone they'll choose "I'm a guest judge."</div>
           </div>
         </div>
       </div>
@@ -329,13 +341,12 @@ function scoreTabHtml(d) {
   }
 
   const eligible = d.contestants.filter((c) => !c.eliminated || c.eliminatedWeekLabel === activeWeek.label);
-  const voteCount = Object.values(S.voteTally).reduce((a, b) => a + b, 0);
 
   const votesBanner =
-    voteCount > 0
+    S.distinctGuests > 0
       ? `<div class="votes-banner">
-          <div style="display:flex;align-items:center;gap:8px;font-size:14px;">📱 ${voteCount} guest vote${voteCount === 1 ? "" : "s"} in for ${esc(activeWeek.label)}</div>
-          <button class="btn btn-gold" data-action="apply-votes" data-week-id="${activeWeek.id}">⚡ Convert votes to bonus points</button>
+          <div style="display:flex;align-items:center;gap:8px;font-size:14px;">📱 ${S.distinctGuests} guest judge${S.distinctGuests === 1 ? "" : "s"} scoring ${esc(activeWeek.label)}</div>
+          <button class="btn btn-gold" data-action="apply-votes" data-week-id="${activeWeek.id}">⚡ Convert guest scores to bonus points</button>
         </div>`
       : "";
 
@@ -344,7 +355,8 @@ function scoreTabHtml(d) {
       const entry = activeWeek.scores[c.id] || { judgeScores: Array(d.numJudges).fill(0), bonus: 0 };
       const judgeSum = (entry.judgeScores || []).slice(0, d.numJudges).reduce((a, b) => a + (Number(b) || 0), 0);
       const total = judgeSum + (Number(entry.bonus) || 0);
-      const votes = S.voteTally[c.id] || 0;
+      const guestAvg = S.guestAverages[c.id];
+      const guestCount = S.guestCounts[c.id] || 0;
       const judgeInputs = Array.from({ length: d.numJudges })
         .map(
           (_, i) => `
@@ -363,7 +375,7 @@ function scoreTabHtml(d) {
             ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
           </div>
           <div style="display:flex;align-items:center;gap:12px;">
-            ${votes > 0 ? `<span style="font-size:12px;color:var(--gold);display:flex;align-items:center;gap:4px;">📱 ${votes}</span>` : ""}
+            ${guestCount > 0 ? `<span style="font-size:12px;color:var(--gold);display:flex;align-items:center;gap:4px;">📱 ${guestAvg.toFixed(1)} avg (${guestCount})</span>` : ""}
             <div class="score-total">${total}</div>
           </div>
         </div>
@@ -475,15 +487,14 @@ function guestHtml() {
   const d = S.data;
   const activeWeek = d && d.weeks.find((w) => w.id === d.activeWeekId);
   const eligible = activeWeek ? d.contestants.filter((c) => !c.eliminated || c.eliminatedWeekLabel === activeWeek.label) : [];
-  const totalVotes = Object.values(S.voteTally).reduce((a, b) => a + b, 0) || 1;
 
   return `
     <div class="guest-wrap">
       <div class="guest-topbar">
-        <div class="eyebrow">★ Guest voting</div>
+        <div class="eyebrow">★ Guest judge</div>
         <button class="switch-btn" data-action="set-role" data-role="">Switch view</button>
       </div>
-      <h1 class="marquee" style="font-size:24px;font-weight:600;margin:0 0 4px;">${esc(d ? d.seasonName : "Dance Party")}</h1>
+      <h1 class="marquee" style="font-size:clamp(18px, 5vw, 24px);font-weight:600;margin:0 0 4px;line-height:1.15;">${esc(d ? d.seasonName : "Dancing From the Couch")}</h1>
 
       ${
         !S.guestName
@@ -493,44 +504,51 @@ function guestHtml() {
                 <input type="text" id="guest-name-input" placeholder="Your name" style="flex:1;" />
                 <button class="btn btn-gold" data-action="save-guest-name">Let's go</button>
               </div>
-              <div style="font-size:12px;color:var(--cream-dim);margin-top:8px;">Your name is only used so your vote can be counted and updated.</div>
+              <div style="font-size:12px;color:var(--cream-dim);margin-top:8px;">Your name is only used so your scores can be counted and updated.</div>
             </div>`
           : ""
       }
 
-      ${S.guestName && !activeWeek ? `<div class="empty-state" style="margin-top:16px;">Voting isn't open yet — ask your host to start this week's scoring.</div>` : ""}
-      ${S.guestName && activeWeek && eligible.length === 0 ? `<div class="empty-state" style="margin-top:16px;">No couples to vote for yet.</div>` : ""}
+      ${S.guestName && !activeWeek ? `<div class="empty-state" style="margin-top:16px;">Judging isn't open yet — ask your host to start this week's scoring.</div>` : ""}
+      ${S.guestName && activeWeek && eligible.length === 0 ? `<div class="empty-state" style="margin-top:16px;">No couples to score yet.</div>` : ""}
 
       ${
         S.guestName && activeWeek && eligible.length > 0
           ? `
         <div style="margin-top:16px;">
           <div style="font-size:14px;color:var(--cream-dim);margin-bottom:12px;">
-            Voting open for <strong style="color:var(--cream);">${esc(activeWeek.label)}</strong>${activeWeek.danceNight ? ` · ${esc(activeWeek.danceNight)}` : ""}
+            Judging open for <strong style="color:var(--cream);">${esc(activeWeek.label)}</strong>${activeWeek.danceNight ? ` · ${esc(activeWeek.danceNight)}` : ""} — score each couple 1–10
           </div>
-          ${S.justVoted ? `<div class="just-voted">✓ Your vote is in!</div>` : ""}
+          ${S.justSaved ? `<div class="just-voted">✓ Score saved!</div>` : ""}
           ${eligible
             .map((c) => {
-              const votes = S.voteTally[c.id] || 0;
-              const pct = Math.round((votes / totalVotes) * 100);
-              const mine = S.myVote === c.id;
+              const mine = S.myScores[c.id];
+              const avg = S.guestAverages[c.id];
+              const count = S.guestCounts[c.id] || 0;
+              const numButtons = Array.from({ length: 10 })
+                .map((_, i) => {
+                  const n = i + 1;
+                  const selected = mine === n;
+                  return `<button class="judge-num-btn ${selected ? "selected" : ""}" data-action="set-guest-score" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" data-score="${n}">${n}</button>`;
+                })
+                .join("");
               return `
-              <button class="vote-card ${mine ? "mine" : ""}" data-action="cast-vote" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}">
-                <div class="vote-fill" style="width:${pct}%;background:${mine ? "rgba(230,181,75,0.14)" : "rgba(214,51,108,0.08)"};"></div>
-                <div class="vote-card-content">
+              <div class="card guest-score-card">
+                <div class="row" style="margin-bottom:10px;">
                   <div>
                     <div class="couple-name">${esc(c.name)}</div>
                     ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
                   </div>
-                  <div style="display:flex;align-items:center;gap:8px;">
-                    ${mine ? `<span style="color:var(--gold);">✓</span>` : ""}
-                    <span style="font-weight:600;color:var(--cream-dim);">${votes}</span>
+                  <div style="font-size:12px;color:var(--cream-dim);text-align:right;">
+                    ${count > 0 ? `avg ${avg.toFixed(1)} · ${count} judge${count === 1 ? "" : "s"}` : "no scores yet"}
+                    ${mine ? `<div style="color:var(--gold);font-weight:600;margin-top:2px;">Your score: ${mine}</div>` : ""}
                   </div>
                 </div>
-              </button>`;
+                <div class="judge-score-row">${numButtons}</div>
+              </div>`;
             })
             .join("")}
-          <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:12px;font-size:12px;color:var(--cream-dim);">⟳ Tally updates automatically</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:12px;font-size:12px;color:var(--cream-dim);">⟳ You can change any score while judging is open</div>
         </div>`
           : ""
       }
@@ -600,9 +618,11 @@ document.addEventListener("click", async (e) => {
     }
     if (action === "select-week") {
       S.data = await api("/api/season", "PATCH", { activeWeekId: Number(btn.dataset.id) });
-      S.voteTally = {};
+      S.guestAverages = {};
+      S.guestCounts = {};
+      S.myScores = {};
       render();
-      pollActiveWeekVotes();
+      pollActiveWeekGuestScores();
       return;
     }
     if (action === "delete-week") {
@@ -611,7 +631,7 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (action === "apply-votes") {
-      S.data = await api(`/api/weeks/${btn.dataset.weekId}/apply-votes`, "POST");
+      S.data = await api(`/api/weeks/${btn.dataset.weekId}/apply-guest-scores`, "POST");
       render();
       return;
     }
@@ -623,21 +643,26 @@ document.addEventListener("click", async (e) => {
       render();
       return;
     }
-    if (action === "cast-vote") {
+    if (action === "set-guest-score") {
       const weekId = btn.dataset.weekId;
       const contestantId = Number(btn.dataset.contestantId);
-      const result = await api(`/api/weeks/${weekId}/vote`, "POST", {
+      const score = Number(btn.dataset.score);
+      const result = await api(`/api/weeks/${weekId}/guest-score`, "POST", {
         name: S.guestName,
         contestantId,
+        score,
       });
-      S.voteTally = result.tally;
-      S.myVote = contestantId;
-      S.justVoted = true;
+      S.guestAverages = result.averages;
+      S.guestCounts = result.counts;
+      S.guestRaw = result.raw;
+      S.distinctGuests = result.distinctGuests;
+      S.myScores[contestantId] = score;
+      S.justSaved = true;
       render();
       setTimeout(() => {
-        S.justVoted = false;
+        S.justSaved = false;
         render();
-      }, 1800);
+      }, 1200);
       return;
     }
   } catch (err) {
