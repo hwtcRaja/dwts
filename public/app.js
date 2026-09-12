@@ -180,6 +180,38 @@ function resizeImageFile(file, maxDim, quality) {
 }
 
 // ---------------------------------------------------------------
+// persistent file input (survives re-renders, unlike one baked into
+// the innerHTML we redraw on every poll — that was why "choose file"
+// looked broken: a poll could swap the input out from under an open
+// file dialog before its change event ever fired)
+// ---------------------------------------------------------------
+const bgFileInput = document.createElement("input");
+bgFileInput.type = "file";
+bgFileInput.accept = "image/*";
+bgFileInput.style.display = "none";
+document.body.appendChild(bgFileInput);
+let pendingBgWeekId = null;
+
+bgFileInput.addEventListener("change", async () => {
+  const file = bgFileInput.files[0];
+  const weekId = pendingBgWeekId;
+  bgFileInput.value = "";
+  pendingBgWeekId = null;
+  if (!file || !weekId) return;
+  try {
+    const dataUrl = await resizeImageFile(file);
+    await api(`/api/weeks/${weekId}/background`, "POST", { image: dataUrl });
+    const week = S.data.weeks.find((w) => w.id === weekId);
+    if (week) week.hasBackground = true;
+    S.weekBackgrounds[weekId] = dataUrl;
+    render();
+  } catch (err) {
+    console.error(err);
+    alert("Couldn't upload that image — please try again.");
+  }
+});
+
+// ---------------------------------------------------------------
 // role chooser
 // ---------------------------------------------------------------
 function roleChooserHtml() {
@@ -336,6 +368,19 @@ function judgesTabHtml() {
 }
 
 
+function nowDancingBannerHtml(couple) {
+  if (!couple) return "";
+  return `
+    <div class="now-dancing-banner">
+      <div class="spotlight-emoji">🔦</div>
+      <div>
+        <div class="now-dancing-label">Now Dancing</div>
+        <div class="now-dancing-name">${esc(couple.name)}${couple.partner ? ` &amp; ${esc(couple.partner)}` : ""}</div>
+      </div>
+    </div>
+  `;
+}
+
 function getLineup(week, eligible) {
   const eligibleIds = eligible.map((c) => c.id);
   const byId = {};
@@ -378,6 +423,7 @@ function scoreTabHtml(d) {
   const lineup = getLineup(activeWeek, eligible);
   const currentId = activeWeek.currentContestantId;
   const currentIdx = lineup.findIndex((c) => c.id === currentId);
+  const banner = currentIdx >= 0 ? nowDancingBannerHtml(lineup[currentIdx]) : "";
 
   const cycleControls =
     lineup.length > 0
@@ -424,12 +470,13 @@ function scoreTabHtml(d) {
     .join("");
 
   return (
+    banner +
     weekControls +
     `
     <div class="week-toolbar">
       <label class="field">Week name<input type="text" value="${esc(activeWeek.label)}" data-field="weekLabel" data-week-id="${activeWeek.id}" style="min-width:160px;" /></label>
       <label class="field">Theme / dance night<input type="text" value="${esc(activeWeek.danceNight)}" placeholder="e.g. Latin Night" data-field="weekDance" data-week-id="${activeWeek.id}" style="min-width:180px;" /></label>
-      <label class="field">Week background<input type="file" accept="image/*" data-field="weekBackground" data-week-id="${activeWeek.id}" style="max-width:170px;font-size:12px;" /></label>
+      <label class="field">Week background<button class="btn btn-outline" data-action="choose-week-background" data-week-id="${activeWeek.id}" style="margin-top:2px;">📷 ${activeWeek.hasBackground ? "Change" : "Upload"} photo</button></label>
       ${activeWeek.hasBackground ? `<button class="btn btn-outline-bad" style="align-self:flex-end;" data-action="remove-week-background" data-week-id="${activeWeek.id}">🗑 Remove background</button>` : ""}
       <button class="btn btn-outline-bad" style="margin-left:auto;" data-action="delete-week" data-id="${activeWeek.id}">🗑 Delete week</button>
     </div>
@@ -562,8 +609,11 @@ function judgeHtml() {
   }
   if (!(S.judgeName && activeWeek && eligible.length > 0)) return "";
 
+  const currentCouple = d.contestants.find((c) => c.id === activeWeek.currentContestantId);
+
   return `
     <div style="margin-top:16px;">
+      ${nowDancingBannerHtml(currentCouple)}
       <div style="font-size:14px;color:var(--cream-dim);margin-bottom:12px;">
         Judging <strong style="color:var(--cream);">${esc(activeWeek.label)}</strong>${activeWeek.danceNight ? ` · ${esc(activeWeek.danceNight)}` : ""} — score each couple 1–10
       </div>
@@ -671,6 +721,11 @@ document.addEventListener("click", async (e) => {
       render();
       return;
     }
+    if (action === "choose-week-background") {
+      pendingBgWeekId = Number(btn.dataset.weekId);
+      bgFileInput.click();
+      return;
+    }
     if (action === "remove-week-background") {
       await api(`/api/weeks/${btn.dataset.weekId}/background`, "DELETE");
       const week = S.data.weeks.find((w) => w.id === Number(btn.dataset.weekId));
@@ -702,6 +757,7 @@ document.addEventListener("click", async (e) => {
       const contestantId = btn.dataset.contestantId ? Number(btn.dataset.contestantId) : null;
       S.data = await api(`/api/weeks/${btn.dataset.weekId}/current`, "POST", { contestantId });
       render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     if (action === "cycle-current") {
@@ -718,6 +774,7 @@ document.addEventListener("click", async (e) => {
       }
       S.data = await api(`/api/weeks/${week.id}/current`, "POST", { contestantId: lineup[nextIdx].id });
       render();
+      window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     if (action === "delete-week") {
@@ -794,18 +851,6 @@ document.addEventListener("change", async (e) => {
     }
     if (t.dataset.field === "weekDance") {
       S.data = await api(`/api/weeks/${t.dataset.weekId}`, "PATCH", { danceNight: t.value });
-      render();
-      return;
-    }
-    if (t.dataset.field === "weekBackground") {
-      const file = t.files[0];
-      if (!file) return;
-      const weekId = Number(t.dataset.weekId);
-      const dataUrl = await resizeImageFile(file);
-      await api(`/api/weeks/${weekId}/background`, "POST", { image: dataUrl });
-      const week = S.data.weeks.find((w) => w.id === weekId);
-      if (week) week.hasBackground = true;
-      S.weekBackgrounds[weekId] = dataUrl;
       render();
       return;
     }

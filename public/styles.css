@@ -63,6 +63,26 @@ body {
 .empty-state { padding: 24px; border-radius: 12px; text-align: center; font-size: 14px; background: rgba(244,238,221,0.04); border: 1px dashed var(--line); color: var(--cream-dim); }
 .card { padding: 16px; border-radius: 12px; background: rgba(244,238,221,0.05); border: 1px solid var(--line); }
 .card.now-dancing { border-color: var(--gold); background: linear-gradient(90deg, rgba(231,181,75,0.14), rgba(244,238,221,0.05)); box-shadow: 0 0 0 1px rgba(231,181,75,0.3); }
+.now-dancing-banner {
+  position: sticky; top: 8px; z-index: 20;
+  display: flex; align-items: center; gap: 14px;
+  padding: 14px 18px; margin-bottom: 16px;
+  border-radius: 14px;
+  background: linear-gradient(90deg, rgba(231,181,75,0.24), rgba(214,51,108,0.16));
+  border: 1px solid var(--gold);
+  animation: now-dancing-pulse 2s ease-in-out infinite;
+}
+@keyframes now-dancing-pulse {
+  0%, 100% { box-shadow: 0 0 14px rgba(231,181,75,0.25); }
+  50% { box-shadow: 0 0 30px rgba(231,181,75,0.55); }
+}
+.now-dancing-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--gold); font-weight: 700; }
+.now-dancing-name { font-family: 'Fraunces', serif; font-size: 20px; font-weight: 600; color: var(--cream); }
+.spotlight-emoji { font-size: 26px; animation: spotlight-sway 1.6s ease-in-out infinite; transform-origin: 50% 0%; }
+@keyframes spotlight-sway {
+  0%, 100% { transform: rotate(-10deg); }
+  50% { transform: rotate(10deg); }
+}
 .reorder-btn { width: 22px; height: 18px; font-size: 9px; line-height: 1; background: rgba(244,238,221,0.08); border: 1px solid var(--line); border-radius: 4px; color: var(--cream-dim); cursor: pointer; }
 .reorder-btn:disabled { opacity: 0.25; cursor: default; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
