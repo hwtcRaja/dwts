@@ -31,9 +31,6 @@ async function initSchema() {
     CREATE TABLE IF NOT EXISTS season_meta (
       id INT PRIMARY KEY DEFAULT 1,
       season_name TEXT NOT NULL DEFAULT 'Dancing From the Couch',
-      num_judges INT NOT NULL DEFAULT 3,
-      judge_max INT NOT NULL DEFAULT 10,
-      points_per_vote NUMERIC NOT NULL DEFAULT 1,
       active_week_id INT
     );
   `);
@@ -41,6 +38,11 @@ async function initSchema() {
     INSERT INTO season_meta (id) VALUES (1)
     ON CONFLICT (id) DO NOTHING;
   `);
+  // clean up columns from an earlier design where the host also entered scores
+  await pool.query(`ALTER TABLE season_meta DROP COLUMN IF EXISTS num_judges;`);
+  await pool.query(`ALTER TABLE season_meta DROP COLUMN IF EXISTS judge_max;`);
+  await pool.query(`ALTER TABLE season_meta DROP COLUMN IF EXISTS points_per_vote;`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS contestants (
       id SERIAL PRIMARY KEY,
@@ -58,17 +60,10 @@ async function initSchema() {
       dance_night TEXT DEFAULT ''
     );
   `);
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS week_scores (
-      week_id INT REFERENCES weeks(id) ON DELETE CASCADE,
-      contestant_id INT REFERENCES contestants(id) ON DELETE CASCADE,
-      judge_scores JSONB NOT NULL DEFAULT '[]',
-      bonus NUMERIC NOT NULL DEFAULT 0,
-      PRIMARY KEY (week_id, contestant_id)
-    );
-  `);
-  // superseded by guest_scores (guests now judge 1-10 per couple, not pick-one)
+  // superseded: scores used to be typed in by the host, plus a separate guest "bonus"
+  await pool.query(`DROP TABLE IF EXISTS week_scores CASCADE;`);
   await pool.query(`DROP TABLE IF EXISTS votes CASCADE;`);
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS guest_scores (
       week_id INT REFERENCES weeks(id) ON DELETE CASCADE,
@@ -90,7 +85,7 @@ const slugify = (s) =>
     .replace(/(^-|-$)/g, "") || "guest";
 
 // ---------------------------------------------------------------
-// Full state (used by both host and guest views)
+// Full state (used by both host and judge views)
 // ---------------------------------------------------------------
 async function getFullState() {
   const meta = (await pool.query(`SELECT * FROM season_meta WHERE id = 1`)).rows[0];
@@ -104,18 +99,24 @@ async function getFullState() {
     eliminatedWeekLabel: c.eliminated_week_label,
   }));
   const weeks = (await pool.query(`SELECT * FROM weeks ORDER BY order_num ASC`)).rows;
-  const scoreRows = (await pool.query(`SELECT * FROM week_scores`)).rows;
+  const scoreRows = (await pool.query(`SELECT * FROM guest_scores`)).rows;
 
   const weeksOut = weeks.map((w) => {
+    const rowsForWeek = scoreRows.filter((r) => r.week_id === w.id);
+    const byContestant = {};
+    rowsForWeek.forEach((r) => {
+      if (!byContestant[r.contestant_id]) byContestant[r.contestant_id] = [];
+      byContestant[r.contestant_id].push({ name: r.voter_name, score: Number(r.score) });
+    });
     const scores = {};
-    scoreRows
-      .filter((r) => r.week_id === w.id)
-      .forEach((r) => {
-        scores[r.contestant_id] = {
-          judgeScores: r.judge_scores,
-          bonus: Number(r.bonus),
-        };
-      });
+    Object.entries(byContestant).forEach(([contestantId, judges]) => {
+      const sum = judges.reduce((a, j) => a + j.score, 0);
+      scores[contestantId] = {
+        avg: sum / judges.length,
+        count: judges.length,
+        judges,
+      };
+    });
     return {
       id: w.id,
       order: w.order_num,
@@ -127,9 +128,6 @@ async function getFullState() {
 
   return {
     seasonName: meta.season_name,
-    numJudges: meta.num_judges,
-    judgeMax: meta.judge_max,
-    pointsPerVote: Number(meta.points_per_vote),
     activeWeekId: meta.active_week_id,
     contestants,
     weeks: weeksOut,
@@ -148,35 +146,40 @@ app.get("/api/state", async (req, res) => {
   }
 });
 
+app.get("/api/judges", async (req, res) => {
+  try {
+    const rows = (
+      await pool.query(
+        `SELECT DISTINCT ON (voter_slug) voter_slug, voter_name
+         FROM guest_scores
+         ORDER BY voter_slug, ts DESC`
+      )
+    ).rows;
+    res.json(
+      rows
+        .map((r) => ({ slug: r.voter_slug, name: r.voter_name }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+    );
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "Could not load judges" });
+  }
+});
+
 app.patch("/api/season", async (req, res) => {
-  const { seasonName, numJudges, judgeMax, pointsPerVote, activeWeekId } = req.body;
+  const { seasonName, activeWeekId } = req.body;
   try {
     await pool.query(
       `UPDATE season_meta SET
         season_name = COALESCE($1, season_name),
-        num_judges = COALESCE($2, num_judges),
-        judge_max = COALESCE($3, judge_max),
-        points_per_vote = COALESCE($4, points_per_vote),
-        active_week_id = COALESCE($5, active_week_id)
+        active_week_id = COALESCE($2, active_week_id)
        WHERE id = 1`,
-      [seasonName, numJudges, judgeMax, pointsPerVote, activeWeekId]
+      [seasonName, activeWeekId]
     );
     res.json(await getFullState());
   } catch (e) {
     console.error(e);
     res.status(500).json({ error: "Could not update season" });
-  }
-});
-
-// active week can also be explicitly cleared
-app.post("/api/season/active-week", async (req, res) => {
-  const { weekId } = req.body; // weekId may be null
-  try {
-    await pool.query(`UPDATE season_meta SET active_week_id = $1 WHERE id = 1`, [weekId]);
-    res.json(await getFullState());
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Could not set active week" });
   }
 });
 
@@ -272,71 +275,7 @@ app.delete("/api/weeks/:id", async (req, res) => {
   }
 });
 
-app.post("/api/weeks/:id/score", async (req, res) => {
-  const weekId = req.params.id;
-  const { contestantId, numJudges, judgeIndex, judgeValue, bonus } = req.body;
-  try {
-    const existing = (
-      await pool.query(
-        `SELECT * FROM week_scores WHERE week_id = $1 AND contestant_id = $2`,
-        [weekId, contestantId]
-      )
-    ).rows[0];
-    let judgeScores = existing ? existing.judge_scores : Array(numJudges || 3).fill(0);
-    while (judgeScores.length < (numJudges || judgeScores.length)) judgeScores.push(0);
-    if (judgeIndex !== undefined && judgeIndex !== null) {
-      judgeScores[judgeIndex] = judgeValue;
-    }
-    const newBonus = bonus !== undefined && bonus !== null ? bonus : existing ? existing.bonus : 0;
-
-    await pool.query(
-      `INSERT INTO week_scores (week_id, contestant_id, judge_scores, bonus)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (week_id, contestant_id)
-       DO UPDATE SET judge_scores = $3, bonus = $4`,
-      [weekId, contestantId, JSON.stringify(judgeScores), newBonus]
-    );
-    res.json(await getFullState());
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Could not save score" });
-  }
-});
-
-async function getGuestScores(weekId) {
-  const rows = (
-    await pool.query(`SELECT * FROM guest_scores WHERE week_id = $1`, [weekId])
-  ).rows;
-  const sums = {};
-  const counts = {};
-  rows.forEach((r) => {
-    sums[r.contestant_id] = (sums[r.contestant_id] || 0) + Number(r.score);
-    counts[r.contestant_id] = (counts[r.contestant_id] || 0) + 1;
-  });
-  const averages = {};
-  Object.keys(sums).forEach((id) => {
-    averages[id] = sums[id] / counts[id];
-  });
-  const raw = rows.map((r) => ({
-    voterSlug: r.voter_slug,
-    voterName: r.voter_name,
-    contestantId: r.contestant_id,
-    score: Number(r.score),
-  }));
-  const distinctGuests = new Set(rows.map((r) => r.voter_slug)).size;
-  return { averages, counts, raw, distinctGuests };
-}
-
-app.get("/api/weeks/:id/guest-scores", async (req, res) => {
-  try {
-    res.json(await getGuestScores(req.params.id));
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Could not load guest scores" });
-  }
-});
-
-app.post("/api/weeks/:id/guest-score", async (req, res) => {
+app.post("/api/weeks/:id/judge-score", async (req, res) => {
   const { name, contestantId, score } = req.body;
   if (!name || !name.trim()) return res.status(400).json({ error: "Name required" });
   if (!contestantId) return res.status(400).json({ error: "Contestant required" });
@@ -350,39 +289,10 @@ app.post("/api/weeks/:id/guest-score", async (req, res) => {
        DO UPDATE SET score = $5, voter_name = $3, ts = $6`,
       [req.params.id, slug, name.trim(), contestantId, clamped, Date.now()]
     );
-    res.json(await getGuestScores(req.params.id));
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "Could not record score" });
-  }
-});
-
-app.post("/api/weeks/:id/apply-guest-scores", async (req, res) => {
-  try {
-    const meta = (await pool.query(`SELECT points_per_vote FROM season_meta WHERE id = 1`))
-      .rows[0];
-    const weight = Number(meta.points_per_vote);
-    const { averages } = await getGuestScores(req.params.id);
-    for (const [contestantId, avg] of Object.entries(averages)) {
-      const existing = (
-        await pool.query(
-          `SELECT * FROM week_scores WHERE week_id = $1 AND contestant_id = $2`,
-          [req.params.id, contestantId]
-        )
-      ).rows[0];
-      const judgeScores = existing ? existing.judge_scores : [];
-      await pool.query(
-        `INSERT INTO week_scores (week_id, contestant_id, judge_scores, bonus)
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT (week_id, contestant_id)
-         DO UPDATE SET bonus = $4`,
-        [req.params.id, contestantId, JSON.stringify(judgeScores), Number((avg * weight).toFixed(2))]
-      );
-    }
     res.json(await getFullState());
   } catch (e) {
     console.error(e);
-    res.status(500).json({ error: "Could not apply guest scores" });
+    res.status(500).json({ error: "Could not record score" });
   }
 });
 

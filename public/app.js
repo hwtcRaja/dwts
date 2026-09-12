@@ -27,15 +27,11 @@ function esc(s) {
 // ---------------------------------------------------------------
 const S = {
   role: localStorage.getItem("dwts_role") || null,
-  guestName: localStorage.getItem("dwts_guest_name") || "",
+  judgeName: localStorage.getItem("dwts_judge_name") || "",
   data: null,
   tab: "score",
   openHistoryWeek: null,
-  guestAverages: {},
-  guestCounts: {},
-  guestRaw: [],
-  distinctGuests: 0,
-  myScores: {},
+  knownJudges: [],
   justSaved: false,
   loading: true,
 };
@@ -48,6 +44,12 @@ function setRole(role) {
   clearInterval(pollHandle);
   render();
   boot();
+}
+
+function switchJudge() {
+  S.judgeName = "";
+  localStorage.setItem("dwts_judge_name", "");
+  render();
 }
 
 // ---------------------------------------------------------------
@@ -63,6 +65,9 @@ async function boot() {
   render();
   try {
     S.data = await api("/api/state");
+    if (S.role === "guest") {
+      S.knownJudges = await api("/api/judges");
+    }
   } catch (e) {
     console.error(e);
   }
@@ -70,13 +75,7 @@ async function boot() {
   render();
 
   clearInterval(pollHandle);
-  if (S.role === "host") {
-    pollHandle = setInterval(pollActiveWeekGuestScores, 4000);
-    pollActiveWeekGuestScores();
-  } else {
-    pollHandle = setInterval(guestPoll, 4000);
-    guestPoll();
-  }
+  pollHandle = setInterval(refreshState, 4000);
 }
 
 async function refreshState() {
@@ -88,65 +87,19 @@ async function refreshState() {
   }
 }
 
-async function pollActiveWeekGuestScores() {
-  if (!S.data || !S.data.activeWeekId) return;
-  try {
-    const { averages, counts, raw, distinctGuests } = await api(
-      `/api/weeks/${S.data.activeWeekId}/guest-scores`
-    );
-    S.guestAverages = averages;
-    S.guestCounts = counts;
-    S.guestRaw = raw;
-    S.distinctGuests = distinctGuests;
-    render();
-  } catch (e) {
-    // ignore
-  }
-}
-
-async function guestPoll() {
-  await refreshState();
-  if (S.data && S.data.activeWeekId) {
-    try {
-      const { averages, counts, raw, distinctGuests } = await api(
-        `/api/weeks/${S.data.activeWeekId}/guest-scores`
-      );
-      S.guestAverages = averages;
-      S.guestCounts = counts;
-      S.guestRaw = raw;
-      S.distinctGuests = distinctGuests;
-      if (S.guestName) {
-        S.myScores = {};
-        raw
-          .filter((r) => r.voterName === S.guestName)
-          .forEach((r) => (S.myScores[r.contestantId] = r.score));
-      }
-      render();
-    } catch (e) {}
-  }
-}
-
 // ---------------------------------------------------------------
 // render root
 // ---------------------------------------------------------------
 function render() {
   if (S.loading) {
-    app.innerHTML = shell(`<div class="spotlight-loading">✦ Warming up the spotlight…</div>`);
+    app.innerHTML = `<div class="spotlight-loading">✦ Warming up the spotlight…</div>`;
     return;
   }
   if (!S.role) {
-    app.innerHTML = shell(roleChooserHtml());
+    app.innerHTML = roleChooserHtml();
     return;
   }
-  if (S.role === "host") {
-    app.innerHTML = shell(hostHtml());
-  } else {
-    app.innerHTML = shell(guestHtml());
-  }
-}
-
-function shell(inner) {
-  return inner;
+  app.innerHTML = S.role === "host" ? hostHtml() : guestHtml();
 }
 
 // ---------------------------------------------------------------
@@ -161,12 +114,12 @@ function roleChooserHtml() {
         <button class="role-card" data-action="set-role" data-role="host">
           <div class="icon" style="font-size:22px;">📺</div>
           <div class="title">I'm hosting</div>
-          <div class="desc">Manage couples, enter judges' scores, run the leaderboard.</div>
+          <div class="desc">Manage couples, run the weeks, watch the leaderboard.</div>
         </button>
         <button class="role-card" data-action="set-role" data-role="guest">
           <div class="icon" style="font-size:22px;">📱</div>
-          <div class="title">I'm a guest judge</div>
-          <div class="desc">Score each couple 1–10 from your phone, just like the real judges.</div>
+          <div class="title">I'm a judge</div>
+          <div class="desc">Score each couple 1–10 from your phone, every week.</div>
         </button>
       </div>
     </div>
@@ -174,19 +127,15 @@ function roleChooserHtml() {
 }
 
 // ---------------------------------------------------------------
-// HOST APP
+// HOST APP — administrative only. No scoring here; the judges score.
 // ---------------------------------------------------------------
 function computeTotals(data) {
   const totals = {};
   data.contestants.forEach((c) => (totals[c.id] = 0));
-  const sorted = [...data.weeks].sort((a, b) => a.order - b.order);
-  sorted.forEach((w) => {
+  data.weeks.forEach((w) => {
     data.contestants.forEach((c) => {
       const entry = w.scores[c.id];
-      if (entry) {
-        const judgeSum = (entry.judgeScores || []).reduce((a, b) => a + (Number(b) || 0), 0);
-        totals[c.id] = (totals[c.id] || 0) + judgeSum + (Number(entry.bonus) || 0);
-      }
+      if (entry) totals[c.id] = (totals[c.id] || 0) + entry.avg;
     });
   });
   return totals;
@@ -199,10 +148,7 @@ function computePriorTotals(data) {
   sorted.forEach((w) => {
     data.contestants.forEach((c) => {
       const entry = w.scores[c.id];
-      if (entry) {
-        const judgeSum = (entry.judgeScores || []).reduce((a, b) => a + (Number(b) || 0), 0);
-        totals[c.id] = (totals[c.id] || 0) + judgeSum + (Number(entry.bonus) || 0);
-      }
+      if (entry) totals[c.id] = (totals[c.id] || 0) + entry.avg;
     });
   });
   return totals;
@@ -225,10 +171,10 @@ function hostHtml() {
         </div>
       </div>
       <div class="tabs">
-        ${tabBtn("score", "Score Entry")}
+        ${tabBtn("score", "This Week")}
         ${tabBtn("leaderboard", "Leaderboard")}
         ${tabBtn("history", "History")}
-        ${tabBtn("couples", "Couples & Settings")}
+        ${tabBtn("couples", "Couples")}
       </div>
     </div>
     <div class="content">
@@ -244,7 +190,7 @@ function tabBtn(id, label) {
   return `<button class="tab-btn ${S.tab === id ? "active" : ""}" data-action="set-tab" data-tab="${id}">${label}</button>`;
 }
 
-// ---- Couples & Settings ----
+// ---- Couples ----
 function couplesTabHtml(d) {
   const rows = d.contestants
     .map(
@@ -266,56 +212,23 @@ function couplesTabHtml(d) {
     )
     .join("");
 
-  const judgeButtons = [1, 2, 3, 4, 5]
-    .map(
-      (n) => `<button class="btn ${d.numJudges === n ? "" : "btn-outline"}" style="${
-        d.numJudges === n ? "background:var(--pink);color:var(--cream);" : ""
-      }width:36px;justify-content:center;" data-action="set-num-judges" data-n="${n}">${n}</button>`
-    )
-    .join("");
-
-  const voteButtons = [0.5, 1, 2, 3]
-    .map(
-      (n) => `<button class="btn ${d.pointsPerVote === n ? "" : "btn-outline"}" style="${
-        d.pointsPerVote === n ? "background:var(--pink);color:var(--cream);" : ""
-      }justify-content:center;" data-action="set-points-per-vote" data-n="${n}">${n}</button>`
-    )
-    .join("");
-
   return `
-    <div style="display:grid;gap:24px;grid-template-columns:1.3fr 1fr;">
-      <div>
-        <div class="section-label">Couples in the season</div>
-        ${d.contestants.length === 0 ? `<div class="empty-state" style="margin-top:12px;">No couples yet. Add your first pairing below.</div>` : `<div style="margin-top:12px;">${rows}</div>`}
-        <div class="card" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px;margin-top:16px;border-style:dashed;">
-          <label class="field">Star<input type="text" id="new-name" placeholder="e.g. Priya" style="min-width:140px;" /></label>
-          <label class="field">Pro partner<input type="text" id="new-partner" placeholder="optional" style="min-width:140px;" /></label>
-          <button class="btn btn-gold" data-action="add-contestant">+ Add couple</button>
-        </div>
+    <div>
+      <div class="section-label">Couples in the season</div>
+      ${d.contestants.length === 0 ? `<div class="empty-state" style="margin-top:12px;">No couples yet. Add your first pairing below.</div>` : `<div style="margin-top:12px;">${rows}</div>`}
+      <div class="card" style="display:flex;flex-wrap:wrap;align-items:flex-end;gap:8px;margin-top:16px;border-style:dashed;max-width:520px;">
+        <label class="field">Star<input type="text" id="new-name" placeholder="e.g. Priya" style="min-width:140px;" /></label>
+        <label class="field">Pro partner<input type="text" id="new-partner" placeholder="optional" style="min-width:140px;" /></label>
+        <button class="btn btn-gold" data-action="add-contestant">+ Add couple</button>
       </div>
-      <div style="display:flex;flex-direction:column;gap:16px;">
-        <div>
-          <div class="section-label">Judging setup</div>
-          <div class="card" style="margin-top:12px;">
-            <div style="font-size:14px;color:var(--cream-dim);margin-bottom:8px;">Number of judges (applies to new weeks)</div>
-            <div style="display:flex;gap:8px;">${judgeButtons}</div>
-            <div style="font-size:12px;color:var(--cream-dim);margin-top:12px;">Full judges' total maxes out at ${d.numJudges * 10} points per week.</div>
-          </div>
-        </div>
-        <div>
-          <div class="section-label">Guest judging</div>
-          <div class="card" style="margin-top:12px;">
-            <div style="font-size:14px;color:var(--cream-dim);margin-bottom:8px;">Weight applied to the guest average</div>
-            <div style="display:flex;gap:8px;">${voteButtons}</div>
-            <div style="font-size:12px;color:var(--cream-dim);margin-top:12px;">Guests score each couple 1–10, just like the real judges. Their average score (× this weight) becomes that couple's bonus points when you convert it. Share this app's URL with your guests — on their phone they'll choose "I'm a guest judge."</div>
-          </div>
-        </div>
+      <div class="empty-state" style="margin-top:20px;max-width:520px;text-align:left;">
+        Scoring happens on guests' own phones — each person who opens this app and taps "I'm a judge" scores every couple 1–10, and their average becomes that couple's score for the week. There's nothing to enter here.
       </div>
     </div>
   `;
 }
 
-// ---- Score Entry ----
+// ---- This Week (monitor only, no input) ----
 function scoreTabHtml(d) {
   const sortedWeeks = [...d.weeks].sort((a, b) => a.order - b.order);
   const activeWeek = d.weeks.find((w) => w.id === d.activeWeekId);
@@ -326,84 +239,61 @@ function scoreTabHtml(d) {
     )
     .join("");
 
+  const weekControls = `
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:20px;">
+      ${weekChips}
+      <button class="btn btn-outline" style="color:var(--gold);border-color:var(--gold-dim);" data-action="add-week">+ New week</button>
+    </div>
+  `;
+
   if (!activeWeek) {
-    return `
-      <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:20px;">
-        ${weekChips}
-        <button class="btn btn-outline" style="color:var(--gold);border-color:var(--gold-dim);" data-action="add-week">+ New week</button>
-      </div>
-      <div class="empty-state">Start a new week to begin entering scores for tonight's dances.</div>
-    `;
+    return weekControls + `<div class="empty-state">Start a new week to open scoring for tonight's dances.</div>`;
   }
 
   if (d.contestants.length === 0) {
-    return `<div class="empty-state">Add couples in the Couples tab before entering scores.</div>`;
+    return weekControls + `<div class="empty-state">Add couples in the Couples tab first.</div>`;
   }
 
   const eligible = d.contestants.filter((c) => !c.eliminated || c.eliminatedWeekLabel === activeWeek.label);
-
-  const votesBanner =
-    S.distinctGuests > 0
-      ? `<div class="votes-banner">
-          <div style="display:flex;align-items:center;gap:8px;font-size:14px;">📱 ${S.distinctGuests} guest judge${S.distinctGuests === 1 ? "" : "s"} scoring ${esc(activeWeek.label)}</div>
-          <button class="btn btn-gold" data-action="apply-votes" data-week-id="${activeWeek.id}">⚡ Convert guest scores to bonus points</button>
-        </div>`
-      : "";
+  const totalJudges = new Set(
+    Object.values(activeWeek.scores).flatMap((s) => s.judges.map((j) => j.name))
+  ).size;
 
   const rows = eligible
     .map((c) => {
-      const entry = activeWeek.scores[c.id] || { judgeScores: Array(d.numJudges).fill(0), bonus: 0 };
-      const judgeSum = (entry.judgeScores || []).slice(0, d.numJudges).reduce((a, b) => a + (Number(b) || 0), 0);
-      const total = judgeSum + (Number(entry.bonus) || 0);
-      const guestAvg = S.guestAverages[c.id];
-      const guestCount = S.guestCounts[c.id] || 0;
-      const judgeInputs = Array.from({ length: d.numJudges })
-        .map(
-          (_, i) => `
-        <div class="judge-col">
-          <span class="judge-label">Judge ${i + 1}</span>
-          <input type="number" min="0" max="${d.judgeMax}" class="score-box" value="${entry.judgeScores[i] ?? 0}"
-            data-action="score-input" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" data-judge-index="${i}" />
-        </div>`
-        )
-        .join("");
+      const entry = activeWeek.scores[c.id];
+      const judgesLine = entry
+        ? entry.judges.map((j) => `${esc(j.name)}: ${j.score}`).join(" · ")
+        : "no scores yet";
       return `
-      <div class="card" style="margin-bottom:12px;">
-        <div class="row" style="margin-bottom:12px;">
+      <div class="card" style="margin-bottom:10px;">
+        <div class="row">
           <div>
             <div class="couple-name">${esc(c.name)}</div>
             ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
+            <div class="couple-sub" style="margin-top:6px;">${judgesLine}</div>
           </div>
-          <div style="display:flex;align-items:center;gap:12px;">
-            ${guestCount > 0 ? `<span style="font-size:12px;color:var(--gold);display:flex;align-items:center;gap:4px;">📱 ${guestAvg.toFixed(1)} avg (${guestCount})</span>` : ""}
-            <div class="score-total">${total}</div>
-          </div>
-        </div>
-        <div class="judge-inputs">
-          ${judgeInputs}
-          <div class="judge-col">
-            <span class="bonus-label">Bonus</span>
-            <input type="number" class="score-box" style="background:rgba(214,51,108,0.12);border-color:rgba(214,51,108,0.35);" value="${entry.bonus ?? 0}"
-              data-action="bonus-input" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" />
+          <div style="text-align:right;">
+            <div class="score-total">${entry ? entry.avg.toFixed(1) : "–"}</div>
+            <div style="font-size:11px;color:var(--cream-dim);">${entry ? entry.count + " judge" + (entry.count === 1 ? "" : "s") : ""}</div>
           </div>
         </div>
       </div>`;
     })
     .join("");
 
-  return `
-    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:20px;">
-      ${weekChips}
-      <button class="btn btn-outline" style="color:var(--gold);border-color:var(--gold-dim);" data-action="add-week">+ New week</button>
-    </div>
+  return (
+    weekControls +
+    `
     <div class="week-toolbar">
       <label class="field">Week name<input type="text" value="${esc(activeWeek.label)}" data-field="weekLabel" data-week-id="${activeWeek.id}" style="min-width:160px;" /></label>
       <label class="field">Theme / dance night<input type="text" value="${esc(activeWeek.danceNight)}" placeholder="e.g. Latin Night" data-field="weekDance" data-week-id="${activeWeek.id}" style="min-width:180px;" /></label>
       <button class="btn btn-outline-bad" style="margin-left:auto;" data-action="delete-week" data-id="${activeWeek.id}">🗑 Delete week</button>
     </div>
-    ${votesBanner}
+    <div style="font-size:13px;color:var(--cream-dim);margin-bottom:12px;">📱 ${totalJudges} judge${totalJudges === 1 ? "" : "s"} have scored so far this week</div>
     ${rows}
-  `;
+  `
+  );
 }
 
 // ---- Leaderboard ----
@@ -417,7 +307,7 @@ function leaderboardTabHtml(d) {
     .map((c, idx) => {
       const total = totals[c.id] || 0;
       const diff = total - (prior[c.id] || 0);
-      const trend = diff > 0 ? `<span style="color:var(--good);">▲</span>` : diff < 0 ? `<span style="color:var(--bad);">▼</span>` : `<span style="color:var(--cream-dim);">–</span>`;
+      const trend = diff > 0.05 ? `<span style="color:var(--good);">▲</span>` : diff < -0.05 ? `<span style="color:var(--bad);">▼</span>` : `<span style="color:var(--cream-dim);">–</span>`;
       return `
       <div class="lb-row ${idx === 0 ? "first" : ""}" style="opacity:${c.eliminated ? 0.55 : 1};">
         <div class="lb-rank">${idx + 1}</div>
@@ -428,7 +318,7 @@ function leaderboardTabHtml(d) {
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           ${trend}
-          <div class="lb-total">${total}</div>
+          <div class="lb-total">${total.toFixed(1)}</div>
         </div>
       </div>`;
     })
@@ -438,7 +328,7 @@ function leaderboardTabHtml(d) {
 // ---- History ----
 function historyTabHtml(d) {
   const sortedWeeks = [...d.weeks].sort((a, b) => b.order - a.order);
-  if (sortedWeeks.length === 0) return `<div class="empty-state">No weeks recorded yet. Head to Score Entry to log your first week.</div>`;
+  if (sortedWeeks.length === 0) return `<div class="empty-state">No weeks yet. Start one from This Week to open scoring.</div>`;
 
   return sortedWeeks
     .map((w) => {
@@ -447,11 +337,10 @@ function historyTabHtml(d) {
         .map((c) => {
           const entry = w.scores[c.id];
           if (!entry) return null;
-          const judgeSum = (entry.judgeScores || []).slice(0, d.numJudges).reduce((a, b) => a + (Number(b) || 0), 0);
-          return { c, judgeSum, bonus: Number(entry.bonus) || 0, total: judgeSum + (Number(entry.bonus) || 0) };
+          return { c, entry };
         })
         .filter(Boolean)
-        .sort((a, b) => b.total - a.total);
+        .sort((a, b) => b.entry.avg - a.entry.avg);
 
       return `
       <div class="hist-week">
@@ -464,10 +353,17 @@ function historyTabHtml(d) {
             ? `<div class="hist-body">
                 ${
                   rows.length === 0
-                    ? `<div style="font-size:14px;color:var(--cream-dim);">No scores entered for this week.</div>`
+                    ? `<div style="font-size:14px;color:var(--cream-dim);">No scores recorded for this week.</div>`
                     : rows
                         .map(
-                          (r) => `<div class="hist-row"><span>${esc(r.c.name)}</span><span style="color:var(--cream-dim);">${r.judgeSum} judges${r.bonus ? ` + ${r.bonus} bonus` : ""} = <strong style="color:var(--gold);">${r.total}</strong></span></div>`
+                          ({ c, entry }) => `
+                        <div class="hist-row" style="flex-direction:column;align-items:flex-start;gap:2px;padding:8px 0;border-bottom:1px solid var(--line);">
+                          <div style="display:flex;justify-content:space-between;width:100%;">
+                            <span><strong>${esc(c.name)}</strong></span>
+                            <strong style="color:var(--gold);">${entry.avg.toFixed(1)}</strong>
+                          </div>
+                          <div style="font-size:12px;color:var(--cream-dim);">${entry.judges.map((j) => `${esc(j.name)}: ${j.score}`).join(" · ")}</div>
+                        </div>`
                         )
                         .join("")
                 }
@@ -481,77 +377,101 @@ function historyTabHtml(d) {
 }
 
 // ---------------------------------------------------------------
-// GUEST APP
+// JUDGE APP (phone view)
 // ---------------------------------------------------------------
-function guestHtml() {
+function judgePickerHtml() {
+  const known = S.knownJudges || [];
+  return `
+    <div class="name-card">
+      <div style="font-size:14px;color:var(--cream-dim);margin-bottom:10px;">Who's judging?</div>
+      ${
+        known.length > 0
+          ? `<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px;">
+              ${known
+                .map(
+                  (j) =>
+                    `<button class="week-chip" data-action="pick-judge" data-name="${esc(j.name)}">${esc(j.name)}</button>`
+                )
+                .join("")}
+            </div>`
+          : ""
+      }
+      <div style="font-size:12px;color:var(--cream-dim);margin-bottom:6px;">${known.length > 0 ? "Not on the list?" : "First time judging:"}</div>
+      <div style="display:flex;gap:8px;">
+        <input type="text" id="guest-name-input" placeholder="Your name" style="flex:1;" />
+        <button class="btn btn-gold" data-action="save-guest-name">Let's go</button>
+      </div>
+    </div>
+  `;
+}
+
+function judgeHtml() {
   const d = S.data;
   const activeWeek = d && d.weeks.find((w) => w.id === d.activeWeekId);
   const eligible = activeWeek ? d.contestants.filter((c) => !c.eliminated || c.eliminatedWeekLabel === activeWeek.label) : [];
 
+  if (S.judgeName && !activeWeek) {
+    return `<div class="empty-state" style="margin-top:16px;">Judging isn't open yet — ask your host to start this week.</div>`;
+  }
+  if (S.judgeName && activeWeek && eligible.length === 0) {
+    return `<div class="empty-state" style="margin-top:16px;">No couples to score yet.</div>`;
+  }
+  if (!(S.judgeName && activeWeek && eligible.length > 0)) return "";
+
+  return `
+    <div style="margin-top:16px;">
+      <div style="font-size:14px;color:var(--cream-dim);margin-bottom:12px;">
+        Judging <strong style="color:var(--cream);">${esc(activeWeek.label)}</strong>${activeWeek.danceNight ? ` · ${esc(activeWeek.danceNight)}` : ""} — score each couple 1–10
+      </div>
+      ${S.justSaved ? `<div class="just-voted">✓ Score saved!</div>` : ""}
+      ${eligible
+        .map((c) => {
+          const entry = activeWeek.scores[c.id];
+          const mine = entry ? (entry.judges.find((j) => j.name === S.judgeName) || {}).score : undefined;
+          const numButtons = Array.from({ length: 10 })
+            .map((_, i) => {
+              const n = i + 1;
+              const selected = mine === n;
+              return `<button class="judge-num-btn ${selected ? "selected" : ""}" data-action="set-guest-score" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" data-score="${n}">${n}</button>`;
+            })
+            .join("");
+          return `
+          <div class="card guest-score-card">
+            <div class="row" style="margin-bottom:10px;">
+              <div>
+                <div class="couple-name">${esc(c.name)}</div>
+                ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
+              </div>
+              <div style="font-size:12px;color:var(--cream-dim);text-align:right;">
+                ${entry ? `avg ${entry.avg.toFixed(1)} · ${entry.count} judge${entry.count === 1 ? "" : "s"}` : "no scores yet"}
+                ${mine ? `<div style="color:var(--gold);font-weight:600;margin-top:2px;">Your score: ${mine}</div>` : ""}
+              </div>
+            </div>
+            <div class="judge-score-row">${numButtons}</div>
+          </div>`;
+        })
+        .join("")}
+      <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:12px;font-size:12px;color:var(--cream-dim);">⟳ You can change any score while judging is open</div>
+    </div>
+  `;
+}
+
+function guestHtml() {
+  const d = S.data;
   return `
     <div class="guest-wrap">
       <div class="guest-topbar">
-        <div class="eyebrow">★ Guest judge</div>
+        <div class="eyebrow">★ Judge</div>
         <button class="switch-btn" data-action="set-role" data-role="">Switch view</button>
       </div>
       <h1 class="marquee" style="font-size:clamp(18px, 5vw, 24px);font-weight:600;margin:0 0 4px;line-height:1.15;">${esc(d ? d.seasonName : "Dancing From the Couch")}</h1>
 
       ${
-        !S.guestName
-          ? `<div class="name-card">
-              <div style="font-size:14px;color:var(--cream-dim);margin-bottom:8px;">What's your name?</div>
-              <div style="display:flex;gap:8px;">
-                <input type="text" id="guest-name-input" placeholder="Your name" style="flex:1;" />
-                <button class="btn btn-gold" data-action="save-guest-name">Let's go</button>
-              </div>
-              <div style="font-size:12px;color:var(--cream-dim);margin-top:8px;">Your name is only used so your scores can be counted and updated.</div>
-            </div>`
+        S.judgeName
+          ? `<div style="font-size:12px;color:var(--cream-dim);margin-bottom:4px;">Judging as <strong style="color:var(--cream);">${esc(S.judgeName)}</strong> · <a href="#" data-action="switch-judge" style="color:var(--gold);">not you?</a></div>`
           : ""
       }
-
-      ${S.guestName && !activeWeek ? `<div class="empty-state" style="margin-top:16px;">Judging isn't open yet — ask your host to start this week's scoring.</div>` : ""}
-      ${S.guestName && activeWeek && eligible.length === 0 ? `<div class="empty-state" style="margin-top:16px;">No couples to score yet.</div>` : ""}
-
-      ${
-        S.guestName && activeWeek && eligible.length > 0
-          ? `
-        <div style="margin-top:16px;">
-          <div style="font-size:14px;color:var(--cream-dim);margin-bottom:12px;">
-            Judging open for <strong style="color:var(--cream);">${esc(activeWeek.label)}</strong>${activeWeek.danceNight ? ` · ${esc(activeWeek.danceNight)}` : ""} — score each couple 1–10
-          </div>
-          ${S.justSaved ? `<div class="just-voted">✓ Score saved!</div>` : ""}
-          ${eligible
-            .map((c) => {
-              const mine = S.myScores[c.id];
-              const avg = S.guestAverages[c.id];
-              const count = S.guestCounts[c.id] || 0;
-              const numButtons = Array.from({ length: 10 })
-                .map((_, i) => {
-                  const n = i + 1;
-                  const selected = mine === n;
-                  return `<button class="judge-num-btn ${selected ? "selected" : ""}" data-action="set-guest-score" data-week-id="${activeWeek.id}" data-contestant-id="${c.id}" data-score="${n}">${n}</button>`;
-                })
-                .join("");
-              return `
-              <div class="card guest-score-card">
-                <div class="row" style="margin-bottom:10px;">
-                  <div>
-                    <div class="couple-name">${esc(c.name)}</div>
-                    ${c.partner ? `<div class="couple-sub">with ${esc(c.partner)}</div>` : ""}
-                  </div>
-                  <div style="font-size:12px;color:var(--cream-dim);text-align:right;">
-                    ${count > 0 ? `avg ${avg.toFixed(1)} · ${count} judge${count === 1 ? "" : "s"}` : "no scores yet"}
-                    ${mine ? `<div style="color:var(--gold);font-weight:600;margin-top:2px;">Your score: ${mine}</div>` : ""}
-                  </div>
-                </div>
-                <div class="judge-score-row">${numButtons}</div>
-              </div>`;
-            })
-            .join("")}
-          <div style="display:flex;align-items:center;justify-content:center;gap:6px;margin-top:12px;font-size:12px;color:var(--cream-dim);">⟳ You can change any score while judging is open</div>
-        </div>`
-          : ""
-      }
+      ${!S.judgeName ? judgePickerHtml() : judgeHtml()}
     </div>
   `;
 }
@@ -601,16 +521,6 @@ document.addEventListener("click", async (e) => {
       render();
       return;
     }
-    if (action === "set-num-judges") {
-      S.data = await api("/api/season", "PATCH", { numJudges: Number(btn.dataset.n) });
-      render();
-      return;
-    }
-    if (action === "set-points-per-vote") {
-      S.data = await api("/api/season", "PATCH", { pointsPerVote: Number(btn.dataset.n) });
-      render();
-      return;
-    }
     if (action === "add-week") {
       S.data = await api("/api/weeks", "POST");
       render();
@@ -618,11 +528,7 @@ document.addEventListener("click", async (e) => {
     }
     if (action === "select-week") {
       S.data = await api("/api/season", "PATCH", { activeWeekId: Number(btn.dataset.id) });
-      S.guestAverages = {};
-      S.guestCounts = {};
-      S.myScores = {};
       render();
-      pollActiveWeekGuestScores();
       return;
     }
     if (action === "delete-week") {
@@ -630,16 +536,22 @@ document.addEventListener("click", async (e) => {
       render();
       return;
     }
-    if (action === "apply-votes") {
-      S.data = await api(`/api/weeks/${btn.dataset.weekId}/apply-guest-scores`, "POST");
+    if (action === "pick-judge") {
+      S.judgeName = btn.dataset.name;
+      localStorage.setItem("dwts_judge_name", S.judgeName);
       render();
+      return;
+    }
+    if (action === "switch-judge") {
+      e.preventDefault();
+      switchJudge();
       return;
     }
     if (action === "save-guest-name") {
       const val = document.getElementById("guest-name-input").value.trim();
       if (!val) return;
-      S.guestName = val;
-      localStorage.setItem("dwts_guest_name", val);
+      S.judgeName = val;
+      localStorage.setItem("dwts_judge_name", val);
       render();
       return;
     }
@@ -647,16 +559,11 @@ document.addEventListener("click", async (e) => {
       const weekId = btn.dataset.weekId;
       const contestantId = Number(btn.dataset.contestantId);
       const score = Number(btn.dataset.score);
-      const result = await api(`/api/weeks/${weekId}/guest-score`, "POST", {
-        name: S.guestName,
+      S.data = await api(`/api/weeks/${weekId}/judge-score`, "POST", {
+        name: S.judgeName,
         contestantId,
         score,
       });
-      S.guestAverages = result.averages;
-      S.guestCounts = result.counts;
-      S.guestRaw = result.raw;
-      S.distinctGuests = result.distinctGuests;
-      S.myScores[contestantId] = score;
       S.justSaved = true;
       render();
       setTimeout(() => {
@@ -685,26 +592,6 @@ document.addEventListener("change", async (e) => {
     }
     if (t.dataset.field === "weekDance") {
       S.data = await api(`/api/weeks/${t.dataset.weekId}`, "PATCH", { danceNight: t.value });
-      render();
-      return;
-    }
-    if (t.dataset.action === "score-input") {
-      const value = Math.max(0, Math.min(S.data.judgeMax, Number(t.value) || 0));
-      S.data = await api(`/api/weeks/${t.dataset.weekId}/score`, "POST", {
-        contestantId: Number(t.dataset.contestantId),
-        numJudges: S.data.numJudges,
-        judgeIndex: Number(t.dataset.judgeIndex),
-        judgeValue: value,
-      });
-      render();
-      return;
-    }
-    if (t.dataset.action === "bonus-input") {
-      S.data = await api(`/api/weeks/${t.dataset.weekId}/score`, "POST", {
-        contestantId: Number(t.dataset.contestantId),
-        numJudges: S.data.numJudges,
-        bonus: Number(t.value) || 0,
-      });
       render();
       return;
     }
